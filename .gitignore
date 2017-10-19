@@ -1,2 +1,7 @@
-tags
-*.wav
+.idea/
+bin/
+include/
+lib/
+share/
+
+pip-selfcheck.json
