@@ -8,13 +8,14 @@ import sys
 import wave
 
 
-def spice2sound(input_audio_file_path, spice_model_path, output_audio_file_path):
+def spice2sound(input_audio_file_path, spice_circuit_path, output_audio_file_path,
+                sim_time=None):
     # Make sure input files exist
     if not os.path.exists(input_audio_file_path):
         print('ERROR: Input audio file "{}" does not exist.'.format(input_audio_file_path))
         return 1
-    if not os.path.exists(spice_model_path):
-        print('ERROR: Spice model file "{}" does not exist.'.format(spice_model_path))
+    if not os.path.exists(spice_circuit_path):
+        print('ERROR: Spice circuit file "{}" does not exist.'.format(spice_circuit_path))
         return 1
 
     # Read in the input audio file info and frames
@@ -22,6 +23,8 @@ def spice2sound(input_audio_file_path, spice_model_path, output_audio_file_path)
     with wave.open(input_audio_file_path, 'rb') as input_audio_file:
         channel_cnt, sample_width, framerate, frame_cnt, _, _ = input_audio_file.getparams()
         input_audio_frames = input_audio_file.readframes(frame_cnt)
+    max_sim_time = frame_cnt / framerate
+    sim_time = max_sim_time if not sim_time else min(sim_time, max_sim_time)
 
     # Convert raw wav frames into values
     fmt = '<{}'.format(channel_cnt * frame_cnt)
@@ -41,10 +44,10 @@ def spice2sound(input_audio_file_path, spice_model_path, output_audio_file_path)
     input_audio_values = input_audio_values.reshape(-1, channel_cnt).T
     print(input_audio_values.shape)
 
-    # TODO: Someday, when PySpice 1.2 rolls out on PyPI...
+    # TODO: Someday, when PySpice 1.2 rolls out on PyPI:
     # https://pyspice.fabrice-salvaire.fr/examples/ngspice-shared/external-source.html
     # # Parse the model and simulate
-    # model     = SpiceParser(path=spice_model_path)
+    # model     = SpiceParser(path=spice_circuit_path)
     # circuit   = model.build_circuit(ground=0)
     # circuit.V('input', 'input', circuit.gnd, 'DC 0 external')
     # print(circuit)
@@ -57,18 +60,55 @@ def spice2sound(input_audio_file_path, spice_model_path, output_audio_file_path)
     #     probes=['output'])
     # print(analysis['output'].shape)
 
+    # Save the input values to file
+    with open('./input_values', 'w') as input_values_file:
+        t = 0
+        for value in input_audio_values[0]:
+            input_values_file.write('{:.6e} {:.4f}\n'.format(t, value))
+            t += 1 / framerate
+
+    # Add lines to Spice circuit for simulation
+    with open(spice_circuit_path, 'rt') as spice_circuit_file:
+        spice_circuit = spice_circuit_file.read()
+    spice_circuit += '\n'.join((
+        '',
+        'A1 %v([input]) filesrc',
+        '',
+        '.control',
+        'save v(output)',
+        'tran {} {}'.format(1 / framerate, sim_time),
+        'wrdata output_values v(output)',
+        '.endc',
+        '',
+        '.model filesrc filesource (file="input_values" amploffset=[0] amplscale=[1]',
+        '+                          timeoffset=0 timescale=1',
+        '+                          timerelative=false amplstep=false)',
+    ))
+    with open('./spice.cir', 'wt') as spice_circuit_file:
+        spice_circuit_file.write(spice_circuit)
+
+    return_code = os.system('ngspice -b {}'.format('./spice.cir'))
+    print('error!' if return_code else 'success!')
+
     return 0
 
 
 if __name__ == '__main__':
     # Parse arguments
     parser = argparse.ArgumentParser()
-    parser.add_argument('input_audio',  metavar='input-audio',
+    parser.add_argument('--sim-time', type=float,
+                        help='limit how many seconds of audio to simulate')
+    parser.add_argument('input_audio',   metavar='input-audio',
                         help='path to the input audio file')
-    parser.add_argument('spice_model',  metavar='spice-model',
-                        help='path to the spice model')
-    parser.add_argument('output_audio', metavar='output-audio',
+    parser.add_argument('spice_circuit', metavar='spice-model',
+                        help='path to the Spice circuit')
+    parser.add_argument('output_audio',  metavar='output-audio',
                         help='path to save the output audio file')
     args = parser.parse_args()
 
-    sys.exit(spice2sound(args.input_audio, args.spice_model, args.output_audio))
+    sys.exit(spice2sound(
+        args.input_audio,
+        args.spice_circuit,
+        args.output_audio,
+        args.sim_time
+    ))
