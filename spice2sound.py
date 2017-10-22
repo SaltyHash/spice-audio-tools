@@ -7,8 +7,6 @@ import struct
 import sys
 import wave
 
-from PySpice.Spice.Parser import SpiceParser
-
 
 def spice2sound(input_audio_file_path, spice_model_path, output_audio_file_path):
     # Make sure input files exist
@@ -20,7 +18,7 @@ def spice2sound(input_audio_file_path, spice_model_path, output_audio_file_path)
         return 1
 
     # Read in the input audio file info and frames
-    # TODO: Support more audio files?
+    # TODO: Support more audio file types?
     with wave.open(input_audio_file_path, 'rb') as input_audio_file:
         channel_cnt, sample_width, framerate, frame_cnt, _, _ = input_audio_file.getparams()
         input_audio_frames = input_audio_file.readframes(frame_cnt)
@@ -41,21 +39,23 @@ def spice2sound(input_audio_file_path, spice_model_path, output_audio_file_path)
     input_audio_values = input_audio_values / (2 ** (8 * sample_width) - 1)
     # Make values accessible by [channel][frame]
     input_audio_values = input_audio_values.reshape(-1, channel_cnt).T
+    print(input_audio_values.shape)
 
-
-    return 1
-
-
-    model     = SpiceParser(path=spice_model_path)
-    circuit   = model.build_circuit()
-    simulator = circuit.simulator()
-    simulator.save('output')
-    analysis  = simulator.transient(
-        step_time=1 / framerate,
-        end_time=frame_cnt / framerate,
-        probes=['output'])
-
-    print(analysis['output'].shape)
+    # TODO: Someday, when PySpice 1.2 rolls out on PyPI...
+    # https://pyspice.fabrice-salvaire.fr/examples/ngspice-shared/external-source.html
+    # # Parse the model and simulate
+    # model     = SpiceParser(path=spice_model_path)
+    # circuit   = model.build_circuit(ground=0)
+    # circuit.V('input', 'input', circuit.gnd, 'DC 0 external')
+    # print(circuit)
+    # simulator = circuit.simulator(simulator='ngspice-shared', ngspice_shared=left_wav_spice_source)
+    # simulator.save('output')
+    # print(simulator)
+    # analysis = simulator.transient(
+    #     step_time=1 / framerate,
+    #     end_time=frame_cnt / framerate,
+    #     probes=['output'])
+    # print(analysis['output'].shape)
 
     return 0
 
