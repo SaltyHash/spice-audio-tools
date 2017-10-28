@@ -76,19 +76,41 @@ def spice2sound(input_audio_file_path, spice_circuit_path, output_audio_file_pat
         '',
         '.control',
         'save v(output)',
+        'set xtrtol=4',
         'tran {} {}'.format(1 / framerate, sim_time),
+        'linearize',
         'wrdata output_values v(output)',
         '.endc',
         '',
+        '.options noacct'
+        '',
         '.model filesrc filesource (file="input_values" amploffset=[0] amplscale=[1]',
         '+                          timeoffset=0 timescale=1',
-        '+                          timerelative=false amplstep=false)',
+        '+                          timerelative=false amplstep=false)'
     ))
     with open('./spice.cir', 'wt') as spice_circuit_file:
         spice_circuit_file.write(spice_circuit)
 
-    return_code = os.system('ngspice -b {}'.format('./spice.cir'))
-    print('error!' if return_code else 'success!')
+    os.system('ngspice -b {}'.format('./spice.cir'))
+
+    # Read the results from the output file
+    with open('./output_values', 'rt') as output_values_file:
+        output_values = [float(line.split()[1]) for line in output_values_file.readlines()]
+    # Discard result at t=0
+    output_values.pop(0)
+    # Normalize the values to [-1.0, 1.0]
+    output_values = np.array(output_values).reshape((1, -1))
+    print(output_values.shape)
+    output_values = output_values / np.max(np.abs(output_values))
+
+    # Write the output values to the output wav file
+    with wave.open(output_audio_file_path, 'wb') as output_audio_file:
+        # 1 channel, 2 bytes per frame, framerate, frame count
+        output_audio_file.setparams((1, 2, framerate, output_values.shape[1], 'NONE', 'not compressed'))
+        output_audio_file.writeframes(struct.pack(
+            '<{}h'.format(output_values.shape[1]),
+            *(output_values[0] * 32767).astype(int)
+        ))
 
     return 0
 
