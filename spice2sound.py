@@ -5,11 +5,17 @@ import numpy as np
 import os
 import struct
 import sys
+import tempfile
 import wave
 
 
+def rms(v):
+    """Returns the RMS voltage of the rows of the v array."""
+    return np.sqrt(np.mean(np.power(v, 2), axis=1))
+
+
 def spice2sound(input_audio_file_path, spice_circuit_path, output_audio_file_path,
-                channel=None, sim_time=None, xtrtol=7.0):
+                channel=None, input_node='input', output_node='output', sim_time=None, xtrtol=7.0):
     # Make sure input files exist
     if not os.path.exists(input_audio_file_path):
         print('ERROR: Input audio file "{}" does not exist.'.format(input_audio_file_path))
@@ -42,6 +48,8 @@ def spice2sound(input_audio_file_path, spice_circuit_path, output_audio_file_pat
     input_audio_values = input_audio_values / (2 ** (8 * sample_width) - 1)
     # Make values accessible by [channel][frame]
     input_audio_values = input_audio_values.reshape(-1, channel_cnt).T
+    input_audio_rms    = np.max(rms(input_audio_values))
+    print(input_audio_rms)
 
     # TODO: Someday, when PySpice 1.2 rolls out on PyPI:
     # https://pyspice.fabrice-salvaire.fr/examples/ngspice-shared/external-source.html
@@ -59,47 +67,61 @@ def spice2sound(input_audio_file_path, spice_circuit_path, output_audio_file_pat
     #     probes=['output'])
     # print(analysis['output'].shape)
 
-    # Save the input values to file
-    t = 0
-    with open('./input_values', 'w') as input_values_file:
-        for value in input_audio_values[1 if (channel_cnt > 1 and channel == 'right') else 0]:
-            input_values_file.write('{:.6e} {:.4f}\n'.format(t, value))
-            t += 1 / framerate
+    # Open a temporary directory
+    with tempfile.TemporaryDirectory(prefix='spice2sound-') as tmp_dir:
+        tmp_input_values_path  = os.path.join(tmp_dir, 'input_values')
+        tmp_output_values_path = os.path.join(tmp_dir, 'output_values')
+        tmp_spice_circuit_path = os.path.join(tmp_dir, 'spice.cir')
 
-    # Add lines to Spice circuit for simulation
-    with open(spice_circuit_path, 'rt') as spice_circuit_file:
-        spice_circuit = spice_circuit_file.read()
-    spice_circuit += '\n'.join((
-        '',
-        'A1 %v([input]) filesrc',
-        '',
-        '.control',
-        'save v(output)',
-        'set xtrtol={}'.format(xtrtol),     # Set simulation quality
-        'tran {} {}'.format(1 / framerate, sim_time),
-        'linearize',        # Transient outputs are not perfectly synced to timestep; this fixes that problem
-        'wrdata output_values v(output)',
-        '.endc',
-        '',
-        '.options noacct'   # Don't print all that netlist stuff
-        '',
-        '.model filesrc filesource (file="input_values"',
-        '+    amploffset=[0] amplscale=[1] amplstep=false',
-        '+    timeoffset=0   timescale=1   timerelative=false)'
-    ))
-    with open('./spice.cir', 'wt') as spice_circuit_file:
-        spice_circuit_file.write(spice_circuit)
+        # Save the input values to tmp file
+        t = 0
+        with open(tmp_input_values_path, 'w') as input_values_file:
+            for value in input_audio_values[1 if (channel_cnt > 1 and channel == 'right') else 0]:
+                input_values_file.write('{:.6e} {:.4f}\n'.format(t, value))
+                t += 1 / framerate
 
-    os.system('ngspice -b {}'.format('./spice.cir'))
+        # Add lines to Spice circuit for simulation
+        with open(spice_circuit_path, 'rt') as spice_circuit_file:
+            spice_circuit = spice_circuit_file.read()
+        spice_circuit += '\n'.join((
+            '',
+            'A1 %v([{}]) filesrc'.format(input_node),
+            '',
+            '.control',
+            'save v({})'.format(output_node),
+            'set xtrtol={}'.format(xtrtol),     # Set simulation quality
+            'tran {} {}'.format(1 / framerate, sim_time),
+            'linearize',        # Transient outputs are not perfectly synced to timestep; this fixes that problem
+            'wrdata {} v({})'.format(tmp_output_values_path, output_node),
+            '.endc',
+            '',
+            '.options noacct'   # Don't print all that netlist stuff
+            '',
+            '.model filesrc filesource (file="{}"'.format(tmp_input_values_path),
+            '+    amploffset=[0] amplscale=[1] amplstep=false',
+            '+    timeoffset=0   timescale=1   timerelative=false)'
+        ))
 
-    # Read the results from the output file
-    with open('./output_values', 'rt') as output_values_file:
-        output_values = [float(line.split()[1]) for line in output_values_file.readlines()]
-    # Discard result at t=0
+        # Save the modified spice circuit to tmp file
+        with open(tmp_spice_circuit_path, 'wt') as spice_circuit_file:
+            spice_circuit_file.write(spice_circuit)
+
+        # Run the simulation!
+        os.system('ngspice -b {}'.format(tmp_spice_circuit_path))
+
+        # Read the results from the tmp output file
+        with open(tmp_output_values_path, 'rt') as output_values_file:
+            output_values = [float(line.split()[1]) for line in output_values_file.readlines()]
+
+    # Discard output result at t=0
     output_values.pop(0)
     # Normalize the values to [-1.0, 1.0]
     output_values = np.array(output_values).reshape((1, -1))
     output_values = output_values / np.max(np.abs(output_values))
+
+    # Scale the output values to match the input audio RMS
+    output_values = output_values * input_audio_rms / np.max(rms(output_values))
+    print(rms(output_values))
 
     # Write the output values to the output wav file
     with wave.open(output_audio_file_path, 'wb') as output_audio_file:
@@ -130,6 +152,14 @@ if __name__ == '__main__':
             (both channels are used by default)'''
     )
     parser.add_argument(
+        '--input-node', metavar='NODE', default='input',
+        help='the Spice circuit\'s input node (defaults to "input")'
+    )
+    parser.add_argument(
+        '--output-node', metavar='NODE', default='output',
+        help='the Spice circuit\'s output node (defaults to "output")'
+    )
+    parser.add_argument(
         '--sim-time', metavar='SECONDS', type=float,
         help='limit how many seconds of audio to simulate (defaults to length of input audio file)'
     )
@@ -147,6 +177,8 @@ if __name__ == '__main__':
         args.spice_circuit,
         args.output_audio,
         args.channel,
+        args.input_node,
+        args.output_node,
         args.sim_time,
         args.xtrtol
     ))
